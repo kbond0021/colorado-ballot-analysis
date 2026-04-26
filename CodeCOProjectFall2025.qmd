@@ -43,8 +43,6 @@ To assess the relationship between changing support from 2016 to 2018 and educat
     library(tidycensus)
     library(tidyr)
 
-    #census_api_key("3bc8dc9a1b30d142e50fe45a3d758a8ae5fdf94f", install = TRUE)
-
 theme_for_map <-
   theme(
     axis.ticks = element_blank(),
