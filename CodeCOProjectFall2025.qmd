@@ -1,0 +1,754 @@
+---
+title: "Education, Ballot Language, and Voter Support in Colorado (2016-2018)"
+author: "Kayla Bond"
+format: html
+editor: visual
+---
+
+# Introduction
+
+This project examines the potential impact of education level on support for a ballot initiative when the wording on the measure changes. In the state of Colorado, Amendment T (2016) failed 50.32% to 49.68%, while a version revised for clarity (Amendment A) passed with 66.21% support in 2018. Analyzing precinct-level election results combined with demographic estimates from the American Community Survey, we explore the question:
+
+How does education influence support for ballot initiatives when the wording of the measure changes?
+
+**Amendment T (2016):** Shall there be an amendment to the Colorado constitution concerning the removal of the exception to the prohibition of slavery and involuntary servitude when used as punishment for persons duly convicted of a crime?
+
+-   Failed 50.32% to 49.68% (2,576,759 total votes)
+
+**Amendment A (2018):** Shall there be an amendment to the Colorado constitution that prohibits slavery and involuntary servitude as punishment for a crime and thereby prohibits slavery and involuntary servitude in all circumstances?
+
+-   Passed 66.21% to 33.79% (2,416,132 total votes)
+
+Support for this amendment increased by \~16 percentage points between 2016 and 2018. Turnout in 2018 was only around six percent lower than in 2016 (midterm election year vs. presidential election year). Notably, Amendment T contained a double negative (ex. "removal of the exception to the prohibition of slavery"), where Amendment A replaced it with straightforward wording (ex. "prohibits slavery").
+
+Turning to education level as a proxy for reading comprehension, precincts with a lower education level may experience the greatest increase in support once the wording was changed. If differences in education help to explain this shift in support, the implication is that the wording (not the policy content) can determine whether a measure passes or fails.
+
+To assess the relationship between changing support from 2016 to 2018 and education level, precinct boundaries were merged with statewide election results. Tract-level education measures from the American Community Survey were then spatially attached to these merged results, providing a demographic estimate of support and education level by precinct for both years. These datasets were then used to visualize choropleth maps, scatterplots, and develop regression models to estimate the relationship between education and changing support.
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+    #install.packages("dplyr")
+    #install.packages("tidyverse")
+    #install.packages("readr")
+    #install.packages("sf")
+    #install.packages("tidycensus")
+    #install.packages("tidyr")
+    library(dplyr)
+    library(tidyverse)
+    library(readr)
+    library(sf)
+    library(tidycensus)
+    library(tidyr)
+
+    #census_api_key("3bc8dc9a1b30d142e50fe45a3d758a8ae5fdf94f", install = TRUE)
+
+theme_for_map <-
+  theme(
+    axis.ticks = element_blank(),
+    axis.text = element_blank(),
+    axis.line = element_blank(),
+    panel.border = element_blank(),
+    panel.grid.major = element_line(color = "transparent"),
+    panel.grid.minor = element_line(color = "transparent"),
+    panel.background = element_blank(),
+    plot.background = element_rect(fill = "transparent", color = "transparent")
+  )
+
+
+```
+
+# Data and Methods
+
+This analysis uses election results downloaded directly from the Colorado Secretary of State, shapefiles for precinct boundaries from the UF Election Lab, and Census data from the American Community Survey.
+
+-   Precinct-level results were retrieved from the Colorado Secretary of State's election database for [Amendment T (2016)](https://historicalelectiondata.coloradosos.gov/contest/4441) and [Amendment A (2018)](https://historicalelectiondata.coloradosos.gov/contest/3934).
+
+-   Precinct shapefiles were obtained from the UF Election Lab for [2016](https://election.lab.ufl.edu/dataset/co-2016-precinct-level-election-results/) and [2018](https://election.lab.ufl.edu/dataset/co-2018-precinct-level-election-results/), and are necessary to create maps of each precinct to attach ACS data to.
+
+-   Five-year education estimates were retrieved from the U.S. Census Bureau ACS using the `{tidycensus}` R package for both 2016 and 2018
+
+    -   For 2016, the 2012-2016 ACS was used
+
+    -   For 2018, the 2014-2018 ACS was used
+
+```{r}
+    acs_vars <- c(
+        total_edu_25_plus = "B15003_001",
+        high_school_diploma = "B15003_017",
+        GED_or_alt = "B15003_018",
+        associates = "B15003_021",
+        bachelors = "B15003_022",
+        masters = "B15003_023",
+        professional = "B15003_024",
+        doctorate = "B15003_025")
+```
+
+-   Education variables were later condensed into broader categories (ex. high school or equivalent, associates, bachelors, and masters plus).
+
+```{r load_2016, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+precincts_2016 <- suppressMessages(
+  sf::st_read("co_precinct_2016/co_2016.shp", quiet = TRUE)
+)
+
+state_results_2016 <- readr::read_csv("4441_table.csv")
+
+state_results_2016 <- state_results_2016 |>
+      mutate(County = ifelse(...1 == "County", ...2, NA)) |>
+      fill(County) |>
+      filter(...1 == "Precinct") |>
+      rename(
+        Precinct     = ...2,
+        Yes          = Yes,
+        No           = No,
+        TotalVotes   = `Total Votes Cast`,
+        TotalBallots = `Total Ballots Cast`
+      ) |>
+      select(County, Precinct, Yes, No, TotalVotes, TotalBallots) |>
+      mutate(Precinct = as.character(Precinct))
+
+precincts_2016 <- precincts_2016 |>
+      rename(Precinct = PRECINCT)
+
+merged_2016 <- state_results_2016 |>
+      left_join(precincts_2016, by = "Precinct")
+
+merged_clean_2016 <- merged_2016 |>
+      select("County", 
+             "Precinct", 
+             "Yes", 
+             "No", 
+             "TotalVotes", 
+             "geometry" 
+             ) |>
+      filter(TotalVotes > 0)
+
+merged_clean_2016 <- st_as_sf(merged_clean_2016)
+
+# --- Add ACS Variables to Precinct/Election Results
+
+acs_2016 <- get_acs(
+      geography = "tract",
+      variables = acs_vars,
+      state = "CO",
+      year = 2016,
+      geometry = TRUE) |>
+      mutate(estimate = as.numeric(estimate))
+
+acs_2016_wide <- acs_2016 |>
+      select(GEOID, geometry, variable, estimate) |>
+      pivot_wider(
+        names_from  = variable,
+        values_from = estimate)
+
+acs_2016_wide <- acs_2016_wide |>
+      mutate(
+        # HS or GED
+        high_school  = high_school_diploma + GED_or_alt,
+        
+        # Degree holders
+        associates   = associates,
+        bachelors    = bachelors,
+        masters_plus = masters + professional + doctorate,
+      ) |>
+      select(
+        GEOID, 
+        geometry, 
+        high_school, 
+        associates,
+        bachelors, 
+        masters_plus, 
+        total_edu_25_plus, 
+      )
+
+# --- Prepping ACS Data to join to Election/Precinct Data
+
+acs_2016_wide <- acs_2016_wide |>
+      st_transform(st_crs(merged_clean_2016)) |>
+      st_make_valid()
+
+merged_clean_2016 <- merged_clean_2016 |> 
+      st_make_valid()
+
+acs_2016_wide <- acs_2016_wide |>
+    mutate(tract_area = as.numeric(st_area(geometry))) |>
+    mutate(across(
+      c(total_edu_25_plus,high_school, bachelors, associates,
+        masters_plus),
+    ~ .x / tract_area,
+    .names = "{.col}_density"
+  ))
+
+# --- FAST method: centroid-based join ---
+
+# get precinct centroids
+precinct_centroids <- merged_clean_2016 |> 
+      st_centroid()
+
+# join each precinct centroid to the tract it falls in
+precinct_tract_join <- st_join(
+      precinct_centroids |> select(Precinct),
+      acs_2016_wide,
+      join = st_within
+    )
+
+# drop geometry to merge back
+precinct_tract_intersect <- st_drop_geometry(precinct_tract_join)
+
+
+# --- Joining Precinct/Election Data with ACS Data
+
+merged_final_2016 <- merged_clean_2016 |>
+      left_join(st_drop_geometry(precinct_tract_intersect), by = "Precinct") |>
+      mutate(ballot_support_rate = Yes / TotalVotes) |>
+      relocate(ballot_support_rate, .before = 6)
+  
+merged_final_2016 <- merged_final_2016 |>
+    filter(
+      !st_is_empty(geometry),
+      !is.na(st_dimension(geometry))
+  )
+```
+
+### Spatial Join
+
+To apply education values from geographically larger Census tracts to smaller precincts, an approximation method is required. This analysis uses a centroid join, where each precinct is assigned the ACS estimate of the tract containing its geometric center. While an area-weighted interpolation is more precise, this approach provides a reasonable estimate that is less computationally intensive. Due to this, education values derived at the precinct level should be interpreted as approximations. Given the 16 percentage point increase in support from 2016 to 2018, if a relationship between education level and ballot language exists, it should be apparent despite the limitations.
+
+**Precinct Centroid Join (2016)**
+
+```{r}
+#| echo: true
+#| results: "hide"
+#| message: false
+#| warning: false
+
+# get precinct centroids
+    precinct_centroids <- merged_clean_2016 |> 
+      st_centroid()
+    
+# join each precinct centroid to the tract it falls in
+    precinct_tract_join <- st_join(
+      precinct_centroids |> select(Precinct),
+      acs_2016_wide,
+      join = st_within
+    )
+
+# drop geometry to can merge back
+    precinct_tract_intersect <- st_drop_geometry(precinct_tract_join)
+
+# joining Precinct/Election Data with ACS Data
+    merged_final_2016 <- merged_clean_2016 |>
+      left_join(st_drop_geometry(precinct_tract_intersect), by = "Precinct") |>
+      mutate(ballot_support_rate = Yes / TotalVotes) |>
+      relocate(ballot_support_rate, .before = 6)
+```
+
+-   *Note: An identical process was repeated for 2018.*
+
+# Results
+
+The following maps depict the ballot support rate for Amendment T in 2016 (Figure X) and then Amendment A in 2018 (Figure Y), while Figure Z depicts the percentage change in support from 2016 to 2018 for each precinct.
+
+> ![](images/clipboard-2208918336.png)
+>
+> The share of voters who supported the amendment in each precinct.
+
+### Precinct Level Support (2016)
+
+```{r map_2016, echo=FALSE, message=FALSE, warning=FALSE, fig.width=16, fig.height=13, dpi=400}
+
+ggplot(merged_final_2016) +
+  geom_sf(aes(fill = ballot_support_rate), color = NA) +
+  scale_fill_viridis_c(
+    option = "viridis",
+    direction = -1,
+    labels = scales::percent_format(accuracy = 1),
+    name   = "Percent who Voted Yes"
+  ) +
+  labs(
+    title   = "Support for Amendment T by Precinct (2016)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title = element_blank(),
+    axis.text  = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "right"
+  )
+```
+
+> **Figure A.** This map depicts the ballot support rate per precinct for Amendment T, using 2016 precinct boundaries and official precinct election results from the CO Secretary of State. Support widely varies, with the highest support rate occurring in urban areas along the front range such as Denver and Boulder. The highest support rate was in Boulder at \~83%, while the lowest occurred in rural counties with only 13-16% of people voting yes. The amendment failed statewide during this year.
+
+### Precinct Level Support (2018)
+
+```{r load_2018, echo=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+
+precincts_2018 <- suppressMessages(
+  sf::st_read("co_2018/co_2018.shp", quiet = TRUE)
+)
+
+#2018 Election
+
+state_results_2018 <- readr::read_csv("3934_table.csv")
+
+state_results_2018 <- state_results_2018 |>
+    mutate(County = ifelse(...1 == "County", ...2, NA)) |>
+    fill(County) |>
+    filter(...1 == "Precinct") |>
+    rename(
+      Precinct     = ...2,
+      Yes          = Yes,
+      No           = No,
+      TotalVotes   = `Total Votes Cast`,
+      TotalBallots = `Total Ballots Cast`
+  ) |>
+    select(County, Precinct, Yes, No, TotalVotes, TotalBallots) |>
+    mutate(Precinct = as.character(Precinct))
+
+precincts_2018 <- precincts_2018 |>
+    rename(Precinct = PRECINCT)
+
+merged_2018 <- state_results_2018 |>
+    left_join(precincts_2018, by = "Precinct")
+
+merged_clean_2018 <- merged_2018 |>
+    select("County", 
+         "Precinct", 
+         "Yes", 
+         "No", 
+         "TotalVotes", 
+         "geometry" 
+  ) |>
+    filter(TotalVotes > 0)
+
+merged_clean_2018 <- st_as_sf(merged_clean_2018)
+
+# --- Add ACS Variables to Precinct/Election Results
+
+acs_2018 <- get_acs(
+    geography = "tract",
+    variables = acs_vars,
+    state = "CO",
+    year = 2018,
+    geometry = TRUE) |>
+    mutate(estimate = as.numeric(estimate))
+
+acs_2018_wide <- acs_2018 |>
+    select(GEOID, geometry, variable, estimate) |>
+    pivot_wider(
+      names_from  = variable,
+      values_from = estimate)
+
+acs_2018_wide <- acs_2018_wide |>
+  mutate(
+        # HS or GED
+        high_school  = high_school_diploma + GED_or_alt,
+        
+        # Degree holders
+        associates   = associates,
+        bachelors    = bachelors,
+        masters_plus = masters + professional + doctorate,
+      ) |>
+      select(
+        GEOID, 
+        geometry, 
+        high_school, 
+        associates,
+        bachelors, 
+        masters_plus, 
+        total_edu_25_plus, 
+      )
+
+# --- Prepping ACS Data to join to Election/Precinct Data
+
+acs_2018_wide <- acs_2018_wide |>
+    st_transform(st_crs(merged_clean_2018)) |>
+    st_make_valid()
+
+merged_clean_2018 <- merged_clean_2018 |> 
+    st_make_valid()
+
+acs_2018_wide <- acs_2018_wide |>
+    mutate(tract_area = as.numeric(st_area(geometry))) |>
+    mutate(across(
+      c(total_edu_25_plus,high_school, bachelors, associates, 
+        masters_plus),
+    ~ .x / tract_area,
+    .names = "{.col}_density"
+  ))
+
+# --- FAST method: centroid-based join instead of st_intersection() ---
+
+# get precinct centroids
+precinct_centroids_2018 <- merged_clean_2018 |> 
+    st_centroid()
+
+# join each precinct centroid to the tract it falls in
+precinct_tract_join <- st_join(
+    precinct_centroids_2018 |> select(Precinct),
+    acs_2018_wide,
+    join = st_within
+  )
+
+# drop geometry so you can merge back
+precinct_tract_intersect <- st_drop_geometry(precinct_tract_join)
+
+
+# --- Joining Precinct/Election Data with ACS Data
+
+merged_final_2018 <- merged_clean_2018 |>
+    left_join(st_drop_geometry(precinct_tract_intersect), by = "Precinct") |>
+    mutate(ballot_support_rate = Yes / TotalVotes) |>
+    relocate(ballot_support_rate, .before = 6)
+
+ merged_final_2018 <- merged_final_2018 |>
+    filter(
+      !st_is_empty(geometry),
+      !is.na(st_dimension(geometry))
+  )
+
+```
+
+```{r map_2018, echo=FALSE, fig.height=13, fig.width=16, message=FALSE, warning=FALSE, dpi=400}
+
+ggplot(merged_final_2018) +
+    geom_sf(aes(fill = ballot_support_rate), color = NA) +
+    scale_fill_viridis_c(
+      option = "viridis",
+      direction = -1,
+      labels = scales::percent_format(accuracy = 1),
+      name   = "Percent who Voted Yes"
+  ) +
+    labs(
+      title   = "Precinct-level support for Amendment A in 2018."
+  ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      axis.title = element_blank(),
+      axis.text  = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank(),
+      legend.position = "right"
+  )
+```
+
+> **Figure B.** This map shows the official precinct election results using 2018 boundaries, displayed as the ballot support rate. Support increased throughout both urban and rural areas, reflecting the fact that Amendment A passed in 2018 with \~66% support. The highest support occurred once again in Denver and Boulder (92-93%), and the lowest support at only 7% in a precinct in Rio Blanco county.
+
+### Change in Support (2016-2018)
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 16
+#| fig-height: 13
+#| dpi: 400
+
+# --- Build change-in-support dataset (2018 - 2016) ---
+
+change_df <- merged_final_2016 |>
+  st_drop_geometry() |>
+  select(
+    Precinct,
+    ballot_support_rate_2016 = ballot_support_rate
+  ) |>
+  inner_join(
+    merged_final_2018 |>
+      st_drop_geometry() |>
+      select(
+        Precinct,
+        ballot_support_rate_2018 = ballot_support_rate
+      ),
+    by = "Precinct"
+  ) |>
+  mutate(
+    change_support = ballot_support_rate_2018 - ballot_support_rate_2016
+  )
+
+# Attach change to 2018 geometries (note: precinct boundaries may differ across years)
+change_map <- merged_final_2018 |>
+  select(County, Precinct, geometry) |>
+  left_join(change_df, by = "Precinct") |>
+  filter(!is.na(change_support)) |>
+  st_as_sf()
+
+
+
+# --- Change map ---
+
+ggplot() +
+  geom_sf(
+    data  = change_map,
+    aes(fill = change_support),
+    color = NA
+  ) +
+  scale_fill_gradient2(
+    low      = "#b30000",
+    mid      = "#f7f7f7",
+    high     = "#084594",
+    midpoint = 0,
+    limits   = c(-0.05, 0.25),
+    oob      = scales::squish,
+    labels   = scales::percent_format(accuracy = 1),
+    name     = "Change in Yes Vote Share\n(2018 – 2016)"
+  ) +
+  labs(
+    title    = "Change in Support for Amendment T/A by Precinct, 2016–2018"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.title      = element_blank(),
+    axis.text       = element_blank(),
+    axis.ticks      = element_blank(),
+    panel.grid      = element_blank(),
+    legend.position = "right")
+
+
+```
+
+> **Figure C.** This map represents the change in support from 2016 to 2018, color graded to show which precincts increased their Yes vote share (darker blue = larger improvement in support) and which decreased support (red = reduction in Yes vote). This was calculated by subtracting the 2016 level of support from the 2018 level, to measure the difference between the two years. Most precincts increased in support, and these higher ballot approval rates are not specific to just urban or rural areas.
+
+# Education and Ballot Support
+
+Education level is measured for individuals 25 and older by the American Community Survey. Adults in this analysis are differentiated into two categories:
+
+1.  Those who do not hold a post-secondary degree. This includes individuals who did not complete high school, those with a diploma or GED, and those who attended some college but did not receive a degree.
+
+2.  Those who hold an Associates, Bachelor's, Master's, or higher.
+
+> ![](images/clipboard-1031539028.png)
+
+This is the key measure used for the analysis, capturing all of the population 25+ with a degree. If education serves as a proxy for reading comprehension, the expectation is that more highly educated precincts would experience a smaller increase in support. That is, they would have been more likely to support the initiative in 2016 despite the wording and maintain support when it appeared on the ballot again in 2018.
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 12
+#| fig-height: 8
+#| dpi: 300
+
+# --- Compute % with no higher degree ---
+
+merged_final_2016 <- merged_final_2016 |>
+  mutate(
+    higher_degree =
+      (associates + bachelors + masters_plus),
+
+    percent_higher_degree =
+      higher_degree / total_edu_25_plus,
+  )
+
+merged_final_2018 <- merged_final_2018 |>
+  mutate(
+    higher_degree =
+      (associates + bachelors + masters_plus),
+
+    percent_higher_degree =
+      higher_degree / total_edu_25_plus,
+  )
+
+# --- Combined scatterplot for 2016 and 2018 ---
+
+combined_scatter <- bind_rows(
+  merged_final_2016 |>
+    mutate(year = "2016: Amendment T") |>
+    st_drop_geometry() |>
+    select(
+      Precinct,
+      year,
+      percent_higher_degree,
+      ballot_support_rate
+    ),
+  merged_final_2018 |>
+    mutate(year = "2018: Amendment A") |>
+    st_drop_geometry() |>
+    select(
+      Precinct,
+      year,
+      percent_higher_degree,
+      ballot_support_rate
+    )
+) |>
+  filter(
+    !is.na(percent_higher_degree),
+    !is.na(ballot_support_rate),
+    is.finite(percent_higher_degree),
+    is.finite(ballot_support_rate)
+  )
+
+# --- Combined Scatterplot ---
+
+ggplot(
+  combined_scatter,
+  aes(   x     = percent_higher_degree,
+         y     = ballot_support_rate,
+         color = year
+    )) +
+  geom_point(alpha = 0.25, size = 1.1) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 1.2) +
+  scale_x_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    name   = "Percent Higher Degree (25+)"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    name   = "Percent Voted Yes"
+  ) +
+
+  scale_color_manual(
+    values = c(
+      "2016: Amendment T" = "#1f78b4",
+      "2018: Amendment A" = "#e31a1c"
+    ),
+    name = "Year / Amendment"
+  ) +
+  labs(
+    title = "Support for Amendment T vs. Amendment A by Education Level"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "right",
+    axis.title      = element_text(size = 15),
+    axis.text       = element_text(size = 9)
+  )
+```
+
+> **Figure D.** Relationship between education level and support for the anti-slavery amendments by precinct in 2016 and 2018. The x-axis shows the percent of adults 25 or older who hold higher degree (Associate's or above), with each precinct's support rate on the y-axis. The loess curves depict each year's trend, showing that support was higher for all education levels in 2018 compared to 2016.
+
+Due to the U-shaped pattern for both 2016 and 2018 on the scatterplot, x-values for the linear regression model are restricted to precincts with greater than 50% of individuals with a higher degree. This value was chosen as the loess relationship appears to become linear at approximately 30-40%. While performing this regression, the bottom 1% and top 1% of data were also omitted to avoid extreme outliers.
+
+#### Filtering Data For Regression Analysis
+
+```{r}
+#| echo: true
+#| message: false
+#| warning: false
+
+# --- Data Prep for Regression
+
+cutoff <- 0.50   # 30% with a higher degree
+
+# --- 2016 ---
+
+right_2016 <- merged_final_2016 |>
+  filter(percent_higher_degree >= cutoff)
+
+# --- Trim extreme outcome outliers (1%–99%) ---
+clean_2016 <- right_2016 |>
+  filter(
+    between(ballot_support_rate,
+            quantile(ballot_support_rate, 0.01, na.rm = TRUE),
+            quantile(ballot_support_rate, 0.99, na.rm = TRUE))
+  )
+```
+
+*Note: An identical process was repeated for 2018.*
+
+#### Regression Results
+
+In 2016, there is a positive relationship between education level and support for Amendment T. The coefficient is 0.426 on percent higher degree, meaning that precincts with more degree-holders were more supportive of the ballot initiative. This relationship becomes approximately linear when at least 35% of the population of a precinct has a higher degree.
+
+In 2018, the relationship remains positive and has a similar coefficient of (0.398). The education effect is only slightly smaller in 2018 (-0.028), indicating that support in general was significantly higher in 2018. Support levels in 2018 were generally higher in every precinct, not just those with fewer highly educated people. For both elections, education remained a strong predictor of support, however it did not have a decisive impact in conjunction with the ballot language
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+
+# --- 2018 ---
+right_2018 <- merged_final_2018 |>
+  filter(percent_higher_degree >= cutoff)
+
+# --- Trim extreme outcome outliers (1%–99%) ---
+clean_2018 <- right_2018 |>
+  filter(
+    between(ballot_support_rate,
+            quantile(ballot_support_rate, 0.01, na.rm = TRUE),
+            quantile(ballot_support_rate, 0.99, na.rm = TRUE))
+  )
+
+
+# --- 2016 Linear regression ---
+model_2016_right <- lm(
+    ballot_support_rate ~ percent_higher_degree,
+    data = clean_2016)
+
+summary(model_2016_right)
+
+# --- 2018 Linear regression ---
+model_2018_right <- lm(
+    ballot_support_rate ~ percent_higher_degree,
+    data = clean_2018)
+
+summary(model_2018_right)
+```
+
+Next, a combined model was used to estimate whether these differences in slope are statistically significant or not. Education was a strong positive predictor of support in both years, and overall support increased significantly in 2018. However, the interaction term between education and the 2018 indicator was not statistically significant, indicating that the education–support relationship did not differ meaningfully between 2016 and 2018. This means that although education is an important predictor for support, it does not explain why the change in ballot language produced a 16 percentage point increase in support in 2018.
+
+```{r}
+#| message: false
+#| warning: false
+#| include: false
+#| paged-print: false
+
+# --- Interaction model: education × year (2016 vs 2018) ---
+
+reg_df <- combined_scatter |>
+  mutate(year_2018 = if_else(year == "2018: Amendment A", 1, 0)) |>
+  filter(
+    percent_higher_degree >= cutoff,
+    !is.na(percent_higher_degree),
+    !is.na(ballot_support_rate),
+    is.finite(percent_higher_degree),
+    is.finite(ballot_support_rate)
+  ) |>
+  filter(
+    between(
+      ballot_support_rate,
+      quantile(ballot_support_rate, 0.01, na.rm = TRUE),
+      quantile(ballot_support_rate, 0.99, na.rm = TRUE)
+    )
+  )
+
+interaction_model <- lm(
+  ballot_support_rate ~ percent_higher_degree * year_2018,
+  data = reg_df
+)
+
+summary(interaction_model)
+confint(interaction_model)
+
+```
+
+## Discussion
+
+Support for Amendment T/A increased from 2016 to 2018 among all education levels. In both years, precincts with higher educational attainment were more likely to vote to approve the ballot initiative. The wording change did not selectively boost support in lower-education precincts; instead, support increased uniformly. This suggests that education level (especially higher education) may not be the best indicator of language comprehension, and other demographic factors could also matter.
+
+Additionally, the use of centroid based joins as well as changing precinct boundaries from 2016 to 2018 introduce room for error and only allow for approximations. Because these are aggregate approximations, they also cannot be directly used to predict individual level behavior (ex. a person with lower education will not necessarily vote a certain way). Based on the locations where support increased the most (Figure C), support remained high in urban areas but seemed to increase more in rural areas. Future studies could explore this relationship and aim to use a more accurate, area-weighted interpolation.
+
+## Conclusion
+
+This project analyzed the relationship between educational attainment and support for anti-slavery amendments in Colorado when ballot language was revised for clarity. Education remains a strong predictor of support, however the 16 percentage point increase from 2016 to 2018 occurred evenly across all education levels. This reveals the persistent importance of education in predicting voter outcomes and provides insight to the universal necessity of comprehensible and clear language. By ensuring that ballot language is simple and accessible, all voters are able to make more informed decisions.
+
+## References
+
+Colorado Secretary of State. *2016 General Election – Amendment T Precinct Results.*\
+<https://historicalelectiondata.coloradosos.gov/contest/4441>
+
+Colorado Secretary of State. *2018 General Election – Amendment A Precinct Results.*\
+<https://historicalelectiondata.coloradosos.gov/contest/3934>
+
+UF Election Lab. *Colorado 2016 Precinct-Level Election Results Dataset.*\
+<https://election.lab.ufl.edu/dataset/co-2016-precinct-level-election-results/>
+
+UF Election Lab. *Colorado 2018 Precinct-Level Election Results Dataset.*\
+<https://election.lab.ufl.edu/dataset/co-2018-precinct-level-election-results/>
+
+U.S. Census Bureau. *American Community Survey (ACS) 5-year Estimates, 2012-2016, 2014–2018.* Retrieved using the `{tidycensus}` R package.
